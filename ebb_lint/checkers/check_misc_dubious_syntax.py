@@ -68,53 +68,6 @@ def check_for_print(p):
     yield p, Errors.no_print, {}
 
 
-@register_checker(
-    """
-
-( import_from< 'from' mod=(NAME | dotted_name) any* >
-| import_name< 'import' mod=(NAME | dotted_name) any* >
-| dotted_as_name< mod=(NAME | dotted_name) any* >
-)
-
-    """,
-    pass_filename=True, pass_future_features=True, pass_grammar=True,
-    python_disabled_version=(3, 0))
-def check_for_implicit_relative_imports(
-        filename, future_features, grammar, mod):  # ✘py3
-    if 'absolute_import' in future_features:
-        return
-    [mod] = mod
-    dirname = os.path.dirname(filename)
-    segments = [
-        l.value for l in mod.pre_order() if l.type == grammar.token.NAME]
-    candidates = []
-    candidates.extend(
-        os.path.join(dirname,
-                     *(segments[:-1] + ['{}.{}'.format(segments[-1], ext)]))
-        for ext in ['py', 'pyc', 'pyo', 'pyd', 'so'])
-    candidates.extend(
-        os.path.join(dirname, *(segments + ['__init__.{}'.format(ext)]))
-        for ext in ['py', 'pyc', 'pyo'])
-    if not any(os.path.exists(candidate) for candidate in candidates):
-        return
-
-    node = next(mod.post_order())
-    yield node, Errors.no_implicit_relative_imports, {}
-
-
-@register_checker("""
-
-( classdef< which='class' any* >
-| funcdef< which='def' any* >
-)
-
-""", pass_filename=True)
-def check_disallowed_dunder_init_statements(filename, which):
-    if os.path.basename(filename) != '__init__.py':
-        return
-    yield which, Errors.no_definition_statements_in_dunder_init, {}
-
-
 @register_checker("""
 
 ( suite< any* simple_stmt any* simple_stmt< p='pass' any > any* >

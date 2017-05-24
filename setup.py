@@ -69,7 +69,7 @@ setup(
     extras_require=extras_require,
     entry_points={
         'flake8.extension': [
-            'L = ebb_lint:EbbLint',
+            'twistedchecker = ebb_lint:EbbLint',
         ],
     },
 )
