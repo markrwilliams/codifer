@@ -42,8 +42,8 @@ def get_config():
     cfg.VCS = "git"
     cfg.style = "pep440"
     cfg.tag_prefix = ""
-    cfg.parentdir_prefix = "ebb-lint-"
-    cfg.versionfile_source = "ebb_lint/_version.py"
+    cfg.parentdir_prefix = "codifer-"
+    cfg.versionfile_source = "codifer/_version.py"
     cfg.verbose = False
     return cfg
 

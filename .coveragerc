@@ -1,6 +1,6 @@
 [run]
 branch = True
-source = ebb_lint
+source = codifer
 omit =
     */test/*
 

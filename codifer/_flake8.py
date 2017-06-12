@@ -3,7 +3,6 @@
 from __future__ import unicode_literals
 
 import bisect
-import io
 import sys
 from awpa.btm_matcher import BottomMatcher
 from awpa import (
@@ -17,24 +16,26 @@ import flake8_polyfill.options
 import flake8_polyfill.stdin
 import pycodestyle
 import six
-import venusian
-from intervaltree import Interval, IntervalTree
+from gather import Collector, Wrapper
+from intervaltree import Interval
 
-from ebb_lint._version import get_versions
-from ebb_lint.errors import Errors
-from ebb_lint import checkers
-
-
-_pycodestyle_noqa = pycodestyle.noqa
-# This is a blight. Disable it unconditionally.
-pycodestyle.noqa = lambda ign: False
 
 flake8_polyfill.stdin.monkey_patch('pycodestyle')
 
 
+def current_python_grammar():
+    grammar_name = 'py{0.major}{0.minor}'.format(sys.version_info)
+    return load_grammar(grammar_name)
+
+
 def fix_grammar_for_future_features(grammar, future_features):
     if 'print_function' in future_features and 'print' in grammar.keywords:
+        grammar_old = grammar
+        grammar = grammar.copy()
+        # XXX: put this in awpa
+        grammar.token, grammar.start, grammar.symbols = grammar_old.token, grammar_old.start, grammar_old.symbols
         del grammar.keywords['print']
+    return grammar
 
 
 @attr.s
@@ -91,6 +92,7 @@ class Lines(object):
 class Source(object):
     text = attr.ib()
     lines = attr.ib()
+    filename = attr.ib()
 
     @classmethod
     def from_filename(cls, filename):
@@ -105,12 +107,12 @@ class Source(object):
             # On python 3, reading from stdin gives you text.
             source = pycodestyle.stdin_get_value()
 
-        return cls.from_text(source)
+        return cls.from_text(source, filename=filename)
 
     @classmethod
-    def from_text(cls, text):
+    def from_text(cls, text, filename=None):
         lines = Lines.from_line_iterator(text.splitlines(True))
-        return cls(text=text, lines=lines)
+        return cls(text=text, lines=lines, filename=filename)
 
     def message_for_node(self, node, error, **kw):
         line_offset = kw.pop('line_offset', None)
@@ -120,12 +122,12 @@ class Source(object):
         else:
             lineno = node.lineno + line_offset
             column = kw.pop('column')
-        return self._message_for_pos((lineno, column), error, **kw)
+        return self.message_for_pos((lineno, column), error, **kw)
 
-    def _message_for_pos(self, pos, error, **kw):
+    def message_for_pos(self, pos, error, **kw):
         lineno, column = pos
-        message = '{} {}'.format(
-            error.value.code, error.value.message.format(**kw))
+        message = '{}{} {}'.format(
+            error._prefix, error.value.code, error.value.message.format(**kw))
         # XXX: what should this type be
         return lineno, column, message, type(None)
 
@@ -136,6 +138,14 @@ class Source(object):
                 self.lines.byte_of_pos(*epos) + base_byte)
 
 
+@attr.s
+class ParsedSource(object):
+    source = attr.ib()
+    future_features = attr.ib()
+    tree = attr.ib()
+    had_trailing_newline = attr.ib()
+
+
 def byte_intersection(tree, lower, upper):
     ret = 0
     for i in tree.search(lower, upper):
@@ -143,44 +153,84 @@ def byte_intersection(tree, lower, upper):
     return ret
 
 
+@attr.s(cmp=False, frozen=True)
+class CheckerConfig(object):
+    string_pattern = attr.ib()
+    extra = attr.ib()
+
+
+@attr.s(cmp=False, frozen=True)
+class CollectedChecker(object):
+    config = attr.ib()
+    function = attr.ib()
+    pattern = attr.ib()
+    tree = attr.ib()
+
+
 @attr.s
 class Collected(object):
     grammar = attr.ib()
     pysyms = attr.ib()
-    checkers = attr.ib()
     matcher = attr.ib()
+    checkers = attr.ib()
 
-    def check_source(self, source):
+    @classmethod
+    def from_grammar_name(cls, grammar_name):
+        _, grammar, pysyms = load_grammar(grammar_name)
+        matcher = BottomMatcher(grammar)
+        return cls(grammar=grammar, pysyms=pysyms, matcher=matcher, checkers=[])
+
+    def gather_checkers(self, collector):
+        all_new_checkers = collector.collect(strategy=Collector.all)
+        for new_checkers in six.itervalues(all_new_checkers):
+            for wrapper in new_checkers:
+                pattern, tree = patcomp.compile_pattern(
+                    self.grammar, wrapper.extra.string_pattern, with_tree=True)
+                self.matcher.add_pattern_by_key(tree, len(self.checkers))
+                self.checkers.append(CollectedChecker(
+                    config=wrapper.extra, function=wrapper.original,
+                    pattern=pattern, tree=tree))
+
+    def parse_source(self, source):
         future_features = self.grammar.detect_future_features(source.text)
-        fix_grammar_for_future_features(self.grammar, future_features)
-        tree, trailing_newline = self.grammar.parse_source(source.text)
+        grammar = fix_grammar_for_future_features(self.grammar, future_features)
+        tree, trailing_newline = grammar.parse_source(source.text)
+        return ParsedSource(
+            source=source, future_features=future_features, tree=tree,
+            had_trailing_newline=trailing_newline)
 
-        for error in self._check_tree(source, tree):
+    def check_parsed(self, parsed):
+        for error in self._check_tree(parsed):
             yield error
 
-    def _check_tree(self, source, tree):
-        matches = self.matcher.run(tree.pre_order())
+    def _check_tree(self, parsed):
+        matches = self.matcher.run(parsed.tree.pre_order())
         node_matches = {}
         for checker_idx, nodes in six.iteritems(matches):
             for node in nodes:
                 node_matches.setdefault(id(node), set()).add(checker_idx)
 
-        for node in tree.pre_order():
+        for node in parsed.tree.pre_order():
             for checker_idx in node_matches.get(id(node), ()):
-                pattern, tree, checker, extra = self.checkers[checker_idx]
+                checker = self.checkers[checker_idx]
                 results = {}
-                if not pattern.match(node, results):
+                if not checker.pattern.match(node, results):
                     continue
+                extra = checker.config.extra
                 for k in extra.get('comments_for', ()):
                     # XXX: this doesn't use `k` for finding the node; `k` is
                     # supposed to name a specific node, but it isn't used when
                     # choosing which node is added to results.
                     results[k + '_comments'] = [
                         c for c, i in self.find_comments(node.prefix)]
+                if extra.get('pass_filename', False):
+                    results['filename'] = parsed.source.filename
+                if extra.get('pass_future_features', False):
+                    results['future_features'] = parsed.future_features
                 if extra.get('pass_grammar', False):
                     results['grammar'] = self.grammar
-                for error_node, error, kw in checker(**results):
-                    yield source.message_for_node(error_node, error, **kw)
+                for error_node, error, kw in checker.function(**results):
+                    yield parsed.source.message_for_node(error_node, error, **kw)
 
     def find_comments(self, source, base_byte=0):
         source = Source.from_text(six.text_type(source).rstrip(' \t\r\n\\'))
@@ -189,63 +239,24 @@ class Collected(object):
                 yield tok, interval
 
 
-def collect_checkers_for_grammar(grammar_name):
-    collected_checkers = []
-    _, grammar, pysyms = load_grammar(grammar_name)
+def make_collector(name):
+    collector = Collector(name=name)
 
-    def register_checker(pattern, checker, extra):
-        if ('python_minimum_version' in extra
-                and sys.version_info < extra['python_minimum_version']):
-            return
-        if ('python_disabled_version' in extra
-                and sys.version_info > extra['python_disabled_version']):
-            return
-        pattern, tree = patcomp.compile_pattern(
-            grammar, pattern, with_tree=True)
-        collected_checkers.append((pattern, tree, checker, extra))
+    def register_checker(pattern, **extra):
+        usable = not (
+            ('python_minimum_version' in extra
+             and sys.version_info < extra['python_minimum_version'])
+            or
+            ('python_disabled_version' in extra
+             and sys.version_info > extra['python_disabled_version']))
 
-    scanner = venusian.Scanner(register=register_checker)
-    scanner.scan(checkers)
-    matcher = BottomMatcher(grammar)
-    for e, (_, tree, _, _) in enumerate(collected_checkers):
-        matcher.add_pattern_by_key(tree, e)
+        if usable:
+            config = CheckerConfig(string_pattern=pattern, extra=extra)
+            deco = collector.register(transform=Wrapper.glue(config))
+        else:
+            def deco(f):
+                return f
 
-    return Collected(grammar=grammar, pysyms=pysyms,
-                     checkers=collected_checkers, matcher=matcher)
+        return deco
 
-
-class EbbLint(object):
-    name = 'twistedchecker'
-    version = get_versions()['version']
-
-    _collected = {}
-    _source = None
-    _lines = None
-
-    def __init__(self, tree, filename):
-        self.filename = filename
-
-    @classmethod
-    def add_options(cls, option_manager):
-        option_manager.add_option(
-            '--parse-as-python-version', metavar='VERSION', default='current',
-            choices=['current', 'py27', 'py35', 'py36'],
-            help='XXX')
-
-    @classmethod
-    def parse_options(cls, option_manager):
-        grammar_name = option_manager.parse_as_python_version
-        if grammar_name == 'current':
-            grammar_name = 'py{0.major}{0.minor}'.format(sys.version_info)
-
-        # This vastly speeds up the test suite, since parse_options is called
-        # on every test now, and venusian does a lot of work.
-        if grammar_name not in cls._collected:
-            cls._collected[grammar_name] = collect_checkers_for_grammar(grammar_name)
-
-        cls._python_grammar_name = grammar_name
-        cls._current_collected = cls._collected[grammar_name]
-
-    def run(self):
-        source = Source.from_filename(self.filename)
-        return self._current_collected.check_source(source)
+    return collector, register_checker

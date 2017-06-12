@@ -1,12 +1,5 @@
-import os
-
 import versioneer
 from setuptools import setup
-
-
-# required due to vboxfs not supporting hard links. this doesn't have any ill
-# effects. it just means there's a bit of copying instead of hard linking.
-del os.link
 
 
 extras_require = {
@@ -15,9 +8,6 @@ extras_require = {
         'pytest',
         'pytest-cov',
     ],
-    ':python_version < "3.4"': [
-        'enum34',
-    ],
 }
 
 extras_require['all'] = list({
@@ -25,12 +15,12 @@ extras_require['all'] = list({
 
 
 install_requires = [
+    'attrs',
     'awpa >= 0.16.1.0',
-    'flake8-polyfill',
-    'flake8 >= 2.6.0',
+    'flake8 >= 3',
+    'gather',
     'intervaltree',
     'six',
-    'venusian',
 ]
 
 
@@ -39,15 +29,14 @@ with open('README.rst') as infile:
 
 
 setup(
-    name='ebb-lint',
-    description='lint for ensuring quality software',
+    name='codifer',
+    description='building blocks for flake8 plugins',
     long_description=long_description,
-    author='Flowroute Inc.',
-    author_email='development@flowroute.com',
-    url='https://github.com/flowroute/ebb-lint',
+    author='XXX',
+    author_email='XXX',
+    url='https://github.com/pyga/codifer',
     classifiers=[
         'Development Status :: 3 - Alpha',
-        'Environment :: Plugins',
         'Intended Audience :: Developers',
         'License :: OSI Approved :: MIT License',
         'Operating System :: OS Independent',
@@ -55,13 +44,12 @@ setup(
         'Programming Language :: Python :: 3.3',
         'Programming Language :: Python :: 3.4',
         'Programming Language :: Python :: 3.5',
+        'Programming Language :: Python :: 3.6',
         'Topic :: Software Development :: Quality Assurance',
     ],
     license='MIT',
     packages=[
-        'ebb_lint',
-        'ebb_lint.checkers',
-        'ebb_lint.test',
+        'codifer',
     ],
     version=versioneer.get_version(),
     cmdclass=versioneer.get_cmdclass(),
@@ -69,7 +57,7 @@ setup(
     extras_require=extras_require,
     entry_points={
         'flake8.extension': [
-            'twistedchecker = ebb_lint:EbbLint',
+            'twistedchecker = codifer:EbbLint',
         ],
     },
 )

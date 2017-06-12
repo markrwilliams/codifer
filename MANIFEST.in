@@ -1,2 +1,2 @@
 include versioneer.py
-include ebb_lint/_version.py
+include codifer/_version.py
